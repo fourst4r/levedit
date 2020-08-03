@@ -12,6 +12,8 @@ import (
 
 	"github.com/inkyblackness/imgui-go/v2"
 
+	"levedit/pr2hub"
+
 	"github.com/fourst4r/course"
 	"github.com/gabstv/ebiten-imgui/renderer"
 	"github.com/hajimehoshi/ebiten"
@@ -57,7 +59,6 @@ type Editor struct {
 	zoom   float64
 	w, h   int
 
-	loginuser, loginpass                                string
 	art00, art0, blocks, art1, art2, art3, bg, settings bool
 
 	// blocks
@@ -73,8 +74,16 @@ type Editor struct {
 	mode         string
 	cowboyChance int
 	pass         string
+	// login
+	loginuser, loginpass string
+	loginstatus          string
+	loginresp            *pr2hub.LoginResponse
 	// goto
 	gotoX, gotoY int32
+
+	config struct {
+		pr2hub.CheckLoginResponse
+	}
 }
 
 const (
@@ -268,18 +277,32 @@ func (e *Editor) drawUI() {
 	}
 	imgui.End()
 
-	flags := imgui.WindowFlagsNoCollapse |
-		imgui.WindowFlagsNoTitleBar |
+	flags := imgui.WindowFlagsNoCollapse | imgui.WindowFlagsNoTitleBar |
 		imgui.WindowFlagsAlwaysAutoResize
 	if imgui.BeginV("Functionbar", nil, flags) {
 		if imgui.Button("Login") {
 			imgui.OpenPopup("Login")
 		}
-		if imgui.BeginPopupModalV("Login", nil, imgui.WindowFlagsNoResize) {
+		if imgui.BeginPopupModalV("Login", nil, imgui.WindowFlagsAlwaysAutoResize) {
 			imgui.InputText("user", &e.loginuser)
 			imgui.InputTextV("pass", &e.loginpass, imgui.InputTextFlagsPassword, nil)
+			if len(e.loginstatus) != 0 {
+				imgui.PushTextWrapPos()
+				imgui.Text(e.loginstatus)
+				imgui.PopTextWrapPos()
+			}
 			if imgui.Button("Log In") {
-				fmt.Printf("user=%s pass=%s", e.loginuser, e.loginpass)
+				resp, err := pr2hub.Login(e.loginuser, e.loginpass)
+				if err != nil {
+					e.loginstatus = fmt.Sprint("error:", err)
+				}
+				e.loginresp = resp
+				if resp.Success {
+					e.loginstatus = fmt.Sprint("Login successful ")
+				} else {
+					e.loginstatus = resp.Error
+				}
+				// fmt.Printf("user=%s pass=%s token=%s", e.loginuser, e.loginpass, resp.Token)
 			}
 			imgui.SameLine()
 			if imgui.Button("Cancel") {
@@ -301,6 +324,14 @@ func (e *Editor) drawUI() {
 
 func xytof(xy course.XY) (x, y float64) {
 	return float64(xy.X), float64(xy.Y)
+}
+
+func (e *Editor) loadConfig() {
+	// ioutil.ReadAll()
+}
+
+func (e *Editor) saveConfig() {
+
 }
 
 func main() {
