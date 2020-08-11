@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	"image/color"
 	_ "image/png"
 	"io/ioutil"
 	"log"
 	"math"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 
 	"github.com/inkyblackness/imgui-go/v2"
 
@@ -76,21 +78,33 @@ type Editor struct {
 	pass         string
 	// login
 	loginuser, loginpass string
+	loginremember        bool
 	loginstatus          string
 	loginresp            *pr2hub.LoginResponse
+	// load
+	levelsgetresp  pr2hub.LevelsGetResponse
+	levelsgotten   bool
+	levelsselected int32
+	levelsnames    []string
+	// download level
+	dldone  bool
+	dllevel string
 	// goto
 	gotoX, gotoY int32
+	// save
+	saveresp string
+	// delete
+	deleteresp pr2hub.DeleteLevelResponse
 
-	config struct {
-		pr2hub.CheckLoginResponse
-	}
+	req    *pr2hub.Req
+	config *Config
 }
 
 const (
 	camSpeed  float64 = 5
 	zoomSpeed         = 1.2
-	zoomMin           = 0.1
-	zoomMax           = 2.0
+	zoomMin           = 0.01
+	zoomMax           = 2.5
 )
 
 func (e *Editor) Update(screen *ebiten.Image) error {
@@ -101,7 +115,7 @@ func (e *Editor) Update(screen *ebiten.Image) error {
 
 	speed := camSpeed
 	if ebiten.IsKeyPressed(ebiten.KeyShift) {
-		speed *= 2
+		speed *= 4
 	}
 
 	if ebiten.IsKeyPressed(ebiten.KeyLeft) || ebiten.IsKeyPressed(ebiten.KeyA) {
@@ -118,31 +132,65 @@ func (e *Editor) Update(screen *ebiten.Image) error {
 		_, yoff := ebiten.Wheel()
 		e.zoom *= math.Pow(zoomSpeed, yoff)
 		e.zoom = clamp(e.zoom, zoomMin, zoomMax)
+
+		lmb := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+		rmb := ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight)
+		if lmb || rmb {
+			g := e.centerCam(screen)
+			if g.IsInvertible() {
+				g.Invert()
+				mx, my := ebiten.CursorPosition()
+				worldx, worldy := g.Apply(float64(mx), float64(my))
+				blockx, blocky := int(math.Floor(worldx/tileSize)), int(math.Floor(worldy/tileSize))
+				gridx, gridy := blockx*tileSize, blocky*tileSize
+
+				if lmb {
+					if _, ok := e.Course.Blocks.Peek(gridx, gridy); !ok {
+						e.Course.Blocks.Push(gridx, gridy, int(e.block))
+					}
+				} else if rmb {
+					e.Course.Blocks.Pop(gridx, gridy)
+				}
+			} else {
+				log.Println("cam is not invertible?", g)
+			}
+		}
 	}
+
 	return nil
 }
 
-func (e *Editor) Draw(screen *ebiten.Image) {
-	e.mgr.BeginFrame()
-	e.drawUI()
-
-	screen.Fill(color.RGBA{
-		uint8(e.backgroundColor[0] * 0xff),
-		uint8(e.backgroundColor[1] * 0xff),
-		uint8(e.backgroundColor[2] * 0xff),
-		0xff,
-	})
-
-	const tileXNum = 10
-	const tileSize = 30
+func (e *Editor) centerCam(screen *ebiten.Image) ebiten.GeoM {
 	bounds := screen.Bounds()
 	var centerX, centerY = float64(bounds.Dx()) / 2, float64(bounds.Dy()) / 2
 
 	centerCam := ebiten.GeoM{}
 	centerCam.Concat(e.cam)
-	centerCam.Translate(centerX, centerY)               // center on screen
-	centerCam.Translate(-tileSize/2, -tileSize/2)       // center on block
+	centerCam.Translate(centerX, centerY) // center on screen
+	// centerCam.Translate(tileSize/2, tileSize/2)         // center on block
 	scaleAround(&centerCam, -centerX, -centerY, e.zoom) // zoom around center
+	return centerCam
+}
+
+const (
+	tileSize = 30
+	tileXNum = 10
+)
+
+func (e *Editor) Draw(screen *ebiten.Image) {
+	e.mgr.BeginFrame()
+	e.drawUI()
+
+	screen.Fill(e.Course.BackgroundColor)
+
+	// bounds := screen.Bounds()
+	// var centerX, centerY = float64(bounds.Dx()) / 2, float64(bounds.Dy()) / 2
+
+	centerCam := e.centerCam(screen) //ebiten.GeoM{}
+	// centerCam.Concat(e.cam)
+	// centerCam.Translate(centerX, centerY)               // center on screen
+	// centerCam.Translate(-tileSize/2, -tileSize/2)       // center on block
+	// scaleAround(&centerCam, -centerX, -centerY, e.zoom) // zoom around center
 
 	axisX1, axisY1 := centerCam.Apply(-9999999, 0)
 	axisX2, axisY2 := centerCam.Apply(9999999, 0)
@@ -200,19 +248,10 @@ func (e *Editor) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHei
 func (e *Editor) drawUI() {
 	if ebiten.IsKeyPressed(ebiten.KeyControl) {
 		if inpututil.IsKeyJustPressed(ebiten.KeyG) {
-			imgui.OpenPopup("Go To")
+			imgui.OpenPopup(PopupGoto)
 		}
 	}
-
-	if imgui.BeginPopup("Go To") {
-		imgui.InputInt("X", &e.gotoX)
-		imgui.InputInt("Y", &e.gotoY)
-		if imgui.Button("Go To") {
-			e.cam.SetElement(0, 2, float64(e.gotoX))
-			e.cam.SetElement(1, 2, float64(e.gotoY))
-		}
-		imgui.EndPopup()
-	}
+	e.gotoPopup()
 
 	if imgui.Begin("Toolbar") {
 		if imgui.BeginTabBar("Tools") {
@@ -244,7 +283,10 @@ func (e *Editor) drawUI() {
 				imgui.EndTabItem()
 			}
 			if imgui.BeginTabItem("BG") {
-				imgui.ColorEdit3("Background Color", &e.backgroundColor)
+				var bgc [3]float32 = coltof3(e.Course.BackgroundColor)
+				if imgui.ColorEdit3V("Background Color", &bgc, imgui.ColorEditFlagsHEX) {
+					e.Course.BackgroundColor = f3tocol(bgc)
+				}
 				imgui.EndTabItem()
 			}
 			if imgui.BeginTabItem("Settings") {
@@ -280,85 +322,458 @@ func (e *Editor) drawUI() {
 	flags := imgui.WindowFlagsNoCollapse | imgui.WindowFlagsNoTitleBar |
 		imgui.WindowFlagsAlwaysAutoResize
 	if imgui.BeginV("Functionbar", nil, flags) {
+
 		if imgui.Button("Login") {
-			imgui.OpenPopup("Login")
+			imgui.OpenPopup(PopupLogin)
 		}
-		if imgui.BeginPopupModalV("Login", nil, imgui.WindowFlagsAlwaysAutoResize) {
-			imgui.InputText("user", &e.loginuser)
-			imgui.InputTextV("pass", &e.loginpass, imgui.InputTextFlagsPassword, nil)
-			if len(e.loginstatus) != 0 {
-				imgui.PushTextWrapPos()
-				imgui.Text(e.loginstatus)
-				imgui.PopTextWrapPos()
-			}
-			if imgui.Button("Log In") {
-				resp, err := pr2hub.Login(e.loginuser, e.loginpass)
-				if err != nil {
-					e.loginstatus = fmt.Sprint("error:", err)
-				}
-				e.loginresp = resp
-				if resp.Success {
-					e.loginstatus = fmt.Sprint("Login successful ")
-				} else {
-					e.loginstatus = resp.Error
-				}
-				// fmt.Printf("user=%s pass=%s token=%s", e.loginuser, e.loginpass, resp.Token)
-			}
-			imgui.SameLine()
-			if imgui.Button("Cancel") {
-				imgui.CloseCurrentPopup()
-			}
-			imgui.EndPopup()
-		}
+		e.loginPopup()
+
 		imgui.SameLine()
+
 		if imgui.Button("Save") {
+			imgui.OpenPopup(PopupSave)
+		}
+		e.savePopup()
+
+		imgui.SameLine()
+
+		if imgui.Button("Load File") {
 
 		}
-		imgui.SameLine()
-		if imgui.Button("New") {
 
+		imgui.SameLine()
+
+		if imgui.Button("Load") {
+			e.req = pr2hub.LevelsGet()
+			e.levelsnames = []string{"Loading..."}
+			e.levelsgotten = false
+			imgui.OpenPopup(PopupLoad)
+		}
+		e.loadPopup()
+
+		imgui.SameLine()
+
+		if imgui.Button("New") {
+			e.loadCourse(course.Default())
+		}
+
+		imgui.SameLine()
+
+		preview := "guest"
+		if e.config.SelectedAcc < len(e.config.Accs) {
+			preview = e.config.Accs[e.config.SelectedAcc].User
+		}
+		if imgui.BeginCombo("Account", preview) {
+			for i, acc := range e.config.Accs {
+				if imgui.Selectable(acc.User) {
+					e.config.SelectedAcc = i
+					e.setAcc(e.config.Accs[i])
+					if err := e.config.Save(); err != nil {
+						log.Println(err)
+					}
+				}
+			}
+			imgui.EndCombo()
 		}
 	}
+
 	imgui.End()
 }
 
-func xytof(xy course.XY) (x, y float64) {
-	return float64(xy.X), float64(xy.Y)
+const (
+	PopupSave         = "PopupSave"
+	PopupSaveProgress = "PopupSaveProgress"
+	PopupSaveResponse = "PopupSaveResponse"
+)
+
+func (e *Editor) savePopup() {
+	// PopupSave
+	imgui.SetNextWindowSize(imgui.Vec2{X: 300, Y: 0})
+	if imgui.BeginPopupModalV(PopupSave, nil, imgui.WindowFlagsNone) {
+		imgui.InputText("Title", &e.Course.Title)
+		imgui.InputTextMultiline("Note", &e.Course.Note)
+		imgui.Checkbox("Publish", &e.Course.Live)
+		if imgui.Button("Save") {
+			acc := e.config.Accs[e.config.SelectedAcc]
+			// log.Println("save", acc.User, acc.Token)
+			var err error
+			e.req, err = pr2hub.UploadLevel(e.Course.String(acc.User, acc.Token))
+			if err != nil {
+				log.Println(err)
+			}
+			imgui.CloseCurrentPopup()
+			defer imgui.OpenPopup(PopupSaveProgress)
+		}
+		imgui.SameLine()
+		if imgui.Button("Cancel") {
+			imgui.CloseCurrentPopup()
+		}
+		imgui.EndPopup()
+	}
+	// PopupSaveProgress
+	if imgui.BeginPopupModalV(PopupSaveProgress, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		if e.req.Done(&e.saveresp) {
+			if err := e.req.Err(); err != nil {
+				log.Println(err)
+			} else {
+				log.Println(e.saveresp)
+			}
+			imgui.CloseCurrentPopup()
+			defer imgui.OpenPopup(PopupSaveResponse)
+		}
+
+		imgui.Text(fmt.Sprintf("Saving the level... %c", spinner()))
+		imgui.EndPopup()
+	}
+	// PopupSaveResponse
+	if imgui.BeginPopupModalV(PopupSaveResponse, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		imgui.Text(e.saveresp)
+		if imgui.Button("OK") {
+			imgui.CloseCurrentPopup()
+		}
+		imgui.EndPopup()
+	}
 }
 
-func (e *Editor) loadConfig() {
-	// ioutil.ReadAll()
+const (
+	PopupLoad         = "PopupLoad"
+	PopupLoadProgress = "PopupLoadProgress"
+	PopupLoadFailure  = "PopupLoadFailure"
+)
+
+func (e *Editor) loadPopup() {
+	// PopupLoad
+	imgui.SetNextWindowSize(imgui.Vec2{X: 400, Y: 0})
+	if imgui.BeginPopupModalV(PopupLoad, nil, imgui.WindowFlagsNone) {
+		if !e.levelsgotten {
+			e.levelsnames[0] = fmt.Sprintf("Loading... %c", spinner())
+			if e.req.Done(&e.levelsgetresp) {
+				// we got the levels, now stop checking req.Done()
+				e.levelsgotten = true
+				if err := e.req.Err(); err != nil {
+					log.Println(err)
+				} else {
+					r := e.levelsgetresp
+					if r.Success {
+						e.levelsnames = make([]string, len(r.Levels))
+						for i, level := range r.Levels {
+							e.levelsnames[i] = level.Title
+						}
+					} else {
+						msg := fmt.Sprintf("pr2hub: %s", r.Error)
+						e.levelsnames = []string{msg}
+					}
+				}
+			}
+		}
+
+		imgui.ColumnsV(2, "col", true)
+
+		imgui.PushItemWidth(-1) // don't show label
+		imgui.ListBoxV("", &e.levelsselected, e.levelsnames, 20)
+		imgui.PopItemWidth()
+
+		imgui.NextColumn()
+		if e.levelsgotten && int(e.levelsselected) < len(e.levelsgetresp.Levels) {
+			imgui.PushTextWrapPos()
+			imgui.Text(e.levelsgetresp.Levels[e.levelsselected].Note)
+			imgui.PopTextWrapPos()
+		}
+		imgui.Columns()
+		imgui.Separator()
+		if imgui.Button("Load##2") && int(e.levelsselected) < len(e.levelsgetresp.Levels) {
+			level := e.levelsgetresp.Levels[e.levelsselected]
+			e.req = pr2hub.Level(level.LevelID, level.Version)
+			imgui.CloseCurrentPopup()
+			defer imgui.OpenPopup(PopupLoadProgress)
+		}
+		imgui.SameLine()
+
+		if imgui.Button("Delete") {
+			level := e.levelsgetresp.Levels[e.levelsselected]
+			token := e.config.Accs[e.config.SelectedAcc].Token
+			var err error
+			e.req, err = pr2hub.DeleteLevel(level.LevelID, token)
+			if err != nil {
+				log.Println(err)
+			}
+			imgui.OpenPopup(PopupDelete)
+		}
+		e.deletePopup()
+
+		imgui.SameLine()
+		if imgui.Button("Cancel") {
+			e.levelsgotten = false
+			e.req.Cancel()
+			imgui.CloseCurrentPopup()
+		}
+
+		imgui.EndPopup()
+	}
+	// PopupLoadProgress
+	if imgui.BeginPopupModalV(PopupLoadProgress, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		if e.req.Done(&e.dllevel) {
+			e.dldone = true
+			if err := e.req.Err(); err != nil {
+				log.Println(err)
+			} else {
+				c, err := course.Parse(e.dllevel)
+				if err != nil {
+					log.Println(err)
+				}
+				e.loadCourse(c)
+			}
+			imgui.CloseCurrentPopup()
+		}
+
+		imgui.Text(fmt.Sprintf("Downloading the level... %c", spinner()))
+		imgui.EndPopup()
+	}
 }
 
-func (e *Editor) saveConfig() {
+const (
+	PopupDelete         = "PopupDelete"
+	PopupDeleteProgress = "PopupDeleteProgress"
+	PopupDeleteResponse = "PopupDeleteResponse"
+)
 
+func (e *Editor) deletePopup() {
+	// PopupDelete
+	if imgui.BeginPopupModalV(PopupDelete, nil, imgui.WindowFlagsNone) {
+		level := e.levelsgetresp.Levels[e.levelsselected]
+		imgui.Text(fmt.Sprintf("Are you sure you want to delete %q?", level.Title))
+		if imgui.Button("Yes") {
+			imgui.CloseCurrentPopup()
+			defer imgui.OpenPopup(PopupDeleteProgress)
+		}
+		imgui.SameLine()
+		if imgui.Button("No") {
+			imgui.CloseCurrentPopup()
+		}
+		imgui.EndPopup()
+	}
+	// PopupDeleteProgress
+	if imgui.BeginPopupModalV(PopupDeleteProgress, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		if e.req.Done(&e.deleteresp) {
+			if err := e.req.Err(); err != nil {
+				log.Println(err)
+			} else {
+				if e.deleteresp.Success {
+					// refresh levels list
+					e.req = pr2hub.LevelsGet()
+					e.levelsnames = []string{"Loading..."}
+					e.levelsgotten = false
+				} else {
+					defer imgui.OpenPopup(PopupDeleteResponse)
+				}
+			}
+			imgui.CloseCurrentPopup()
+		}
+
+		imgui.Text(fmt.Sprintf("Deleting the level... %c", spinner()))
+		imgui.EndPopup()
+	}
+	// PopupDeleteResponse
+	if imgui.BeginPopupModalV(PopupDeleteResponse, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		imgui.Text(e.deleteresp.Error)
+		if imgui.Button("OK") {
+			imgui.CloseCurrentPopup()
+		}
+		imgui.EndPopup()
+	}
+}
+
+const (
+	PopupGoto = "Go to##PopupGoto"
+)
+
+func (e *Editor) gotoPopup() {
+	if imgui.BeginPopup(PopupGoto) {
+		imgui.InputInt("X", &e.gotoX)
+		imgui.InputInt("Y", &e.gotoY)
+		if imgui.Button("Go To") {
+			setPos(&e.cam, float64(e.gotoX), float64(e.gotoY))
+		}
+		imgui.SameLine()
+		if imgui.Button("1") {
+			e.gotoBlock(course.BlockPlayer1)
+		}
+		imgui.SameLine()
+		if imgui.Button("2") {
+			e.gotoBlock(course.BlockPlayer2)
+		}
+		imgui.SameLine()
+		if imgui.Button("3") {
+			e.gotoBlock(course.BlockPlayer3)
+		}
+		imgui.SameLine()
+		if imgui.Button("4") {
+			e.gotoBlock(course.BlockPlayer4)
+		}
+		imgui.EndPopup()
+	}
+}
+
+const (
+	PopupLogin         = "Login##PopupLogin"
+	PopupLoginProgress = "Logging in##PopupLoginProgress"
+	PopupLoginFailure  = "Login failed##PopupLoginFailure"
+)
+
+func (e *Editor) loginPopup() {
+	// PopupLogin
+	if imgui.BeginPopupModalV(PopupLogin, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		imgui.InputText("user", &e.loginuser)
+		imgui.InputTextV("pass", &e.loginpass, imgui.InputTextFlagsPassword, nil)
+		// imgui.Checkbox("remember?", &e.loginremember)
+		if imgui.Button("Log In") {
+			var err error
+			e.req, err = pr2hub.LoginReq(e.loginuser, e.loginpass, e.loginremember)
+			if err == nil {
+				imgui.CloseCurrentPopup()
+				defer imgui.OpenPopup(PopupLoginProgress)
+			} else {
+				e.loginstatus = err.Error()
+				log.Println(err)
+			}
+		}
+		imgui.SameLine()
+		if imgui.Button("Cancel") {
+			imgui.CloseCurrentPopup()
+		}
+		imgui.EndPopup()
+	}
+	// PopupLoginProgress
+	if imgui.BeginPopupModalV(PopupLoginProgress, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		var resp pr2hub.LoginResponse
+		if e.req.Done(&resp) {
+			if err := e.req.Err(); err != nil {
+				e.loginstatus = fmt.Sprint("error:", err)
+				log.Println(err)
+			} else {
+				if resp.Success {
+					e.loginstatus = fmt.Sprint("Login successful ")
+					acc := Acc{e.loginuser, resp.Token}
+					e.setAcc(acc)
+					e.config.Accs = append(e.config.Accs, acc)
+					// e.setToken(resp.Token)
+					err = e.config.Save()
+					if err != nil {
+						log.Println(err)
+					}
+					// imgui.CloseCurrentPopup()
+				} else {
+					e.loginstatus = resp.Error
+					defer imgui.OpenPopup(PopupLoginFailure)
+				}
+			}
+			imgui.CloseCurrentPopup()
+		} else {
+			imgui.Text(fmt.Sprintf("Logging in... %c", spinner()))
+			if imgui.Button("Cancel") {
+				e.req.Cancel()
+				imgui.CloseCurrentPopup()
+				defer imgui.OpenPopup(PopupLogin)
+			}
+		}
+		imgui.EndPopup()
+	}
+	// PopupLoginFailure
+	if imgui.BeginPopupModalV(PopupLoginFailure, nil, imgui.WindowFlagsAlwaysAutoResize) {
+		imgui.Text(e.loginstatus)
+		if imgui.Button("OK") {
+			imgui.CloseCurrentPopup()
+			defer imgui.OpenPopup(PopupLogin)
+		}
+		imgui.EndPopup()
+	}
+}
+
+func (e *Editor) setAcc(acc Acc) {
+	u, err := url.Parse("https://pr2hub.com")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	cookie := &http.Cookie{Name: "token", Value: acc.Token}
+	http.DefaultClient.Jar, err = cookiejar.New(nil)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	http.DefaultClient.Jar.SetCookies(u, []*http.Cookie{cookie})
+	log.Printf("Logged in as %s:%s\n", acc.User, acc.Token)
 }
 
 func main() {
-	ebiten.SetWindowSize(640, 480)
-	ebiten.SetWindowTitle("levedit")
+	ebiten.SetWindowSize(1280, 960)
+	ebiten.SetWindowTitle(fmt.Sprintf("%s v%s", AppName, AppVersion))
 	ebiten.SetWindowResizable(true)
 
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Println(err)
+	}
+
 	e := &Editor{
-		Course: course.Default(),
 		mgr:    renderer.New(nil),
 		zoom:   1,
+		config: cfg,
 	}
-outer:
-	for xy, stack := range e.Course.Blocks {
-		for _, block := range stack {
-			if 111 == block.(int) {
-				x, y := xytof(xy)
-				e.cam.Translate(-x, -y)
-				break outer
-			}
+	if cfg.SelectedAcc > len(cfg.Accs) {
+		if len(cfg.Accs) > 0 {
+			e.setAcc(cfg.Accs[0])
 		}
+	} else {
+		e.setAcc(cfg.Accs[cfg.SelectedAcc])
 	}
-	e.Course.Blocks.Push(0, 0, 0)
+
+	// resp, err := pr2hub.CheckLogin()
+	// if err == nil {
+	// 	if len(resp.UserName) != 0 {
+	// 		log.Println("Logged in as", resp.UserName)
+	// 	}
+	// 	// cfg.CheckLoginResponse = *resp
+	// } else {
+	// 	log.Println("CheckLogin failed:", err)
+	// }
+
+	e.loadCourse(course.Default())
 
 	if err := ebiten.RunGame(e); err != nil {
 		panic(err)
 	}
+}
+
+func (e *Editor) loadCourse(c *course.Course) {
+	e.Course = c
+	e.gotoBlock(course.BlockPlayer1)
+}
+
+func (e *Editor) gotoBlock(b int) {
+	for xy, stack := range e.Course.Blocks {
+		for _, block := range stack {
+			if b == block.(int) || b == block.(int)-100 {
+				x, y := xytof(xy)
+				setPos(&e.cam, -x, -y)
+				return
+			}
+		}
+	}
+
+}
+
+func (e *Editor) screenToWorld(screen *ebiten.Image, x, y float64) (float64, float64) {
+	g := e.centerCam(screen)
+	if g.IsInvertible() {
+		g.Invert()
+		return g.Apply(x, y)
+	}
+	log.Println("cam is not invertible?", g)
+	return math.NaN(), math.NaN()
+}
+
+func setPos(g *ebiten.GeoM, x, y float64) {
+	g.SetElement(0, 2, x)
+	g.SetElement(1, 2, y)
 }
 
 func scaleAround(g *ebiten.GeoM, x, y, scale float64) {
@@ -367,12 +782,10 @@ func scaleAround(g *ebiten.GeoM, x, y, scale float64) {
 	g.Translate(-x, -y)
 }
 
-func clamp(v, min, max float64) float64 {
-	if v < min {
-		return min
-	}
-	if v > max {
-		return max
-	}
-	return v
+func spinner() byte {
+	return "|/-\\"[int(imgui.Time()/0.05)&3]
+}
+
+func xytof(xy course.XY) (x, y float64) {
+	return float64(xy.X), float64(xy.Y)
 }

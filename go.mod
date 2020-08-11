@@ -9,7 +9,10 @@ require (
 	github.com/hajimehoshi/oto v0.6.2 // indirect
 	github.com/inkyblackness/imgui-go/v2 v2.4.1
 	github.com/kr/pretty v0.1.0 // indirect
+	github.com/pkg/errors v0.9.1
 	golang.org/x/image v0.0.0-20200618115811-c13761719519
 )
 
-replace github.com/fourst4r/course => "/media/oxyge/New Volume/dev2/go/course"
+replace github.com/fourst4r/course => /home/oxyge/Documents/course //"/media/oxyge/New Volume/dev2/go/course"
+
+replace github.com/inkyblackness/imgui-go/v2 => /home/oxyge/Documents/imgui-go
