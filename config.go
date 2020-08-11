@@ -16,7 +16,7 @@ func init() {
 	}
 	dir = filepath.Join(dir, AppName)
 	log.Println("Making new config dir")
-	err = os.MkdirAll(dir, 0644)
+	err = os.MkdirAll(dir, 0700)
 	if err != nil {
 		log.Println(err)
 	}
@@ -25,7 +25,7 @@ func init() {
 
 func LoadConfig() (*Config, error) {
 	var cfg Config
-	f, err := os.OpenFile(configPath, os.O_RDONLY, 0644)
+	f, err := os.OpenFile(configPath, os.O_RDONLY, 0700)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &cfg, nil
@@ -46,7 +46,7 @@ type Config struct {
 }
 
 func (c *Config) Save() error {
-	f, err := os.OpenFile(configPath, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := os.OpenFile(configPath, os.O_CREATE|os.O_WRONLY, 0700)
 	if err != nil {
 		return err
 	}

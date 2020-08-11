@@ -1,4 +1,4 @@
-module levedit
+module github.com/fourst4r/levedit
 
 go 1.14
 

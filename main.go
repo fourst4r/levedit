@@ -14,7 +14,7 @@ import (
 
 	"github.com/inkyblackness/imgui-go/v2"
 
-	"levedit/pr2hub"
+	"github.com/fourst4r/levedit/pr2hub"
 
 	"github.com/fourst4r/course"
 	"github.com/gabstv/ebiten-imgui/renderer"
@@ -489,7 +489,7 @@ func (e *Editor) loadPopup() {
 		}
 		imgui.SameLine()
 
-		if imgui.Button("Delete") {
+		if imgui.Button("Delete") && int(e.levelsselected) < len(e.levelsgetresp.Levels) {
 			level := e.levelsgetresp.Levels[e.levelsselected]
 			token := e.config.Accs[e.config.SelectedAcc].Token
 			var err error
@@ -628,7 +628,7 @@ func (e *Editor) loginPopup() {
 		// imgui.Checkbox("remember?", &e.loginremember)
 		if imgui.Button("Log In") {
 			var err error
-			e.req, err = pr2hub.LoginReq(e.loginuser, e.loginpass, e.loginremember)
+			e.req, err = pr2hub.Login(e.loginuser, e.loginpass, e.loginremember)
 			if err == nil {
 				imgui.CloseCurrentPopup()
 				defer imgui.OpenPopup(PopupLoginProgress)
@@ -656,11 +656,12 @@ func (e *Editor) loginPopup() {
 					acc := Acc{e.loginuser, resp.Token}
 					e.setAcc(acc)
 					e.config.Accs = append(e.config.Accs, acc)
-					// e.setToken(resp.Token)
+					e.config.SelectedAcc = len(e.config.Accs) - 1
 					err = e.config.Save()
 					if err != nil {
 						log.Println(err)
 					}
+
 					// imgui.CloseCurrentPopup()
 				} else {
 					e.loginstatus = resp.Error
@@ -718,12 +719,12 @@ func main() {
 		zoom:   1,
 		config: cfg,
 	}
-	if cfg.SelectedAcc > len(cfg.Accs) {
-		if len(cfg.Accs) > 0 {
+	if len(cfg.Accs) > 0 {
+		if cfg.SelectedAcc > len(cfg.Accs) {
 			e.setAcc(cfg.Accs[0])
+		} else {
+			e.setAcc(cfg.Accs[cfg.SelectedAcc])
 		}
-	} else {
-		e.setAcc(cfg.Accs[cfg.SelectedAcc])
 	}
 
 	// resp, err := pr2hub.CheckLogin()
