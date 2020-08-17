@@ -40,7 +40,10 @@ var (
 	}
 )
 
-var blocksImage *ebiten.Image
+var (
+	blocksImage *ebiten.Image
+	blockImgs   map[int]*ebiten.Image
+)
 
 func init() {
 	b, err := ioutil.ReadFile("assets/pr2-blocks.png")
@@ -52,6 +55,13 @@ func init() {
 		log.Fatal(err)
 	}
 	blocksImage, _ = ebiten.NewImageFromImage(img, ebiten.FilterDefault)
+	blockImgs = make(map[int]*ebiten.Image)
+	for i := 0; i < len(blocks); i++ {
+		sx := (i % tileXNum) * tileSize
+		sy := (i / tileXNum) * tileSize
+		subimg := blocksImage.SubImage(image.Rect(sx, sy, sx+tileSize, sy+tileSize)).(*ebiten.Image)
+		blockImgs[i] = subimg
+	}
 }
 
 type Editor struct {
@@ -271,6 +281,22 @@ func (e *Editor) drawUI() {
 
 					imgui.EndCombo()
 				}
+
+				// imgui.ColumnsV(3, "Blocks", false)
+				for i := 0; i < len(blocks); i++ {
+					if i%8 != 0 {
+						imgui.SameLine()
+					}
+					id := 100 + i
+					if imgui.ImageButton(imgui.TextureID(id), imgui.Vec2{tileSize, tileSize}) {
+						e.block = course.Block(id - 100)
+						log.Println("pressed", id)
+					}
+					// if id%10 == 0 {
+					// 	imgui.NextColumn()
+					// }
+				}
+
 				imgui.EndTabItem()
 			}
 			if imgui.BeginTabItem("Art1") {
@@ -738,6 +764,11 @@ func main() {
 	// }
 
 	e.loadCourse(course.Default())
+
+	for i, subimg := range blockImgs {
+		// id := imgui.TextureID((unsafe.Pointer(subimg)))
+		e.mgr.Cache.SetTexture(imgui.TextureID(100+i), subimg)
+	}
 
 	if err := ebiten.RunGame(e); err != nil {
 		panic(err)
