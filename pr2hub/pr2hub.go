@@ -119,7 +119,8 @@ func UploadLevel(data string) (*Req, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return httpReq2(req, nil), nil
+	values := make(url.Values)
+	return httpReq3(req, queryUnmarshal, &values), nil
 }
 
 type DeleteLevelResponse jsonResponse
@@ -135,7 +136,7 @@ func DeleteLevel(levelID, token string) (*Req, error) {
 	req.Header.Add("Referer", referer)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var d DeleteLevelResponse
-	return httpReq2(req, &d), nil
+	return httpReq3(req, jsonUnmarshal, &d), nil
 }
 
 type CheckLoginResponse struct {
@@ -143,16 +144,16 @@ type CheckLoginResponse struct {
 	GuildID  interface{} `json:"guild_id"`
 }
 
-func CheckLogin() (*CheckLoginResponse, error) {
-	resp, err := http.Get("https://pr2hub.com/check_login.php")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var r CheckLoginResponse
-	err = json.NewDecoder(resp.Body).Decode(&r)
-	return &r, err
-}
+// func CheckLogin() (*CheckLoginResponse, error) {
+// 	resp, err := http.Get("https://pr2hub.com/check_login.php")
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	defer resp.Body.Close()
+// 	var r CheckLoginResponse
+// 	err = json.NewDecoder(resp.Body).Decode(&r)
+// 	return &r, err
+// }
 
 type LevelsGetResponse struct {
 	Success bool   `json:"success"`
@@ -176,8 +177,57 @@ type LevelsGetResponse struct {
 }
 
 func LevelsGet() *Req {
+	// var l LevelsGetResponse
+	// return httpReq(&l, "GET", "https://pr2hub.com/levels_get.php", nil)
+
+	req, err := http.NewRequest("GET", "https://pr2hub.com/levels_get.php", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var l LevelsGetResponse
-	return httpReq(&l, "GET", "https://pr2hub.com/levels_get.php", nil)
+	return httpReq3(req, jsonUnmarshal, &l)
+}
+
+// TODO: v exists so the unmarshalling happens in another goroutine,
+//       is this necessary?
+func httpReq3(request *http.Request, unmarshal UnmarshalFunc, v interface{}) *Req {
+	respCh := make(chan interface{})
+	ctx, cancel := context.WithCancel(context.Background())
+	req := &Req{ctx: ctx, cancel: cancel, respCh: respCh}
+	method, url := request.Method, request.URL.String()
+	wrap := func(err error) error {
+		return errors.Wrap(err, fmt.Sprintf("ERR %s %q", method, url))
+	}
+	log.Println("} BEGIN {", method, url)
+
+	go func() {
+		defer close(respCh)
+		defer cancel()
+		defer log.Println("} CANCEL {", method, url)
+
+		resp, err := http.DefaultClient.Do(request)
+		if err != nil {
+			respCh <- err
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			respCh <- wrap(fmt.Errorf("bad status: %s", resp.Status))
+			return
+		}
+
+		err = unmarshal(resp.Body, v)
+		if err != nil {
+			respCh <- err
+			return
+		}
+		respCh <- v
+
+		log.Println("} SUCCESS {", method, url)
+	}()
+
+	return req
 }
 
 func httpReq2(request *http.Request, v interface{}) *Req {
@@ -364,8 +414,17 @@ func httpReq(v interface{}, method string, url string, body io.Reader) *Req {
 }
 
 func Level(id, version string) *Req {
-	url := fmt.Sprintf("https://pr2hub.com/levels/%s.txt?version=%s", id, version)
-	return httpReq(nil, "GET", url, nil)
+	uri := fmt.Sprintf("https://pr2hub.com/levels/%s.txt?version=%s", id, version)
+	// return httpReq(nil, "GET", url, nil)
+	req, err := http.NewRequest("GET", uri, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// query := make(url.Values)
+	var data string
+	// levels are not correctly url escaped so we can't
+	// unmarshal to url.Values
+	return httpReq3(req, stringUnmarshal, &data)
 }
 
 type Req struct {
@@ -396,6 +455,7 @@ func (r *Req) Done(v interface{}) bool {
 			if reflect.ValueOf(resp).Kind() == reflect.String {
 				rv.Elem().SetString(resp.(string))
 			} else {
+				fmt.Printf("%T", resp)
 				rv.Elem().Set(reflect.ValueOf(resp).Elem())
 			}
 			return true
@@ -420,3 +480,24 @@ type jsonResponse struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error"`
 }
+
+type UnmarshalFunc func(r io.Reader, v interface{}) error
+
+var (
+	jsonUnmarshal = func(r io.Reader, v interface{}) error {
+		return json.NewDecoder(r).Decode(v)
+	}
+	stringUnmarshal = func(r io.Reader, v interface{}) error {
+		b, err := ioutil.ReadAll(r)
+		*v.(*string) = string(b)
+		return err
+	}
+	queryUnmarshal = func(r io.Reader, v interface{}) error {
+		b, err := ioutil.ReadAll(r)
+		if err != nil {
+			return err
+		}
+		*v.(*url.Values), err = url.ParseQuery(string(b))
+		return err
+	}
+)

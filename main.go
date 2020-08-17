@@ -90,7 +90,7 @@ type Editor struct {
 	loginuser, loginpass string
 	loginremember        bool
 	loginstatus          string
-	loginresp            *pr2hub.LoginResponse
+	// loginresp            *pr2hub.LoginResponse
 	// load
 	levelsgetresp  pr2hub.LevelsGetResponse
 	levelsgotten   bool
@@ -102,7 +102,7 @@ type Editor struct {
 	// goto
 	gotoX, gotoY int32
 	// save
-	saveresp string
+	saveresp url.Values
 	// delete
 	deleteresp pr2hub.DeleteLevelResponse
 
@@ -119,26 +119,31 @@ const (
 
 func (e *Editor) Update(screen *ebiten.Image) error {
 	e.mgr.Update(1.0/60.0, float32(e.w), float32(e.h))
-	if inpututil.IsKeyJustPressed(ebiten.KeyC) {
-		// g.mgr.ClipMask = !g.mgr.ClipMask
-	}
 
-	speed := camSpeed
-	if ebiten.IsKeyPressed(ebiten.KeyShift) {
-		speed *= 4
-	}
+	io := imgui.CurrentIO()
+	if !io.WantCaptureKeyboard() {
+		if inpututil.IsKeyJustPressed(ebiten.KeyC) {
+			// g.mgr.ClipMask = !g.mgr.ClipMask
+		}
 
-	if ebiten.IsKeyPressed(ebiten.KeyLeft) || ebiten.IsKeyPressed(ebiten.KeyA) {
-		e.cam.Translate(speed, 0)
-	} else if ebiten.IsKeyPressed(ebiten.KeyRight) || ebiten.IsKeyPressed(ebiten.KeyD) {
-		e.cam.Translate(-speed, 0)
+		speed := camSpeed
+		if ebiten.IsKeyPressed(ebiten.KeyShift) {
+			speed *= 4
+		}
+
+		if ebiten.IsKeyPressed(ebiten.KeyLeft) || ebiten.IsKeyPressed(ebiten.KeyA) {
+			e.cam.Translate(speed, 0)
+		} else if ebiten.IsKeyPressed(ebiten.KeyRight) || ebiten.IsKeyPressed(ebiten.KeyD) {
+			e.cam.Translate(-speed, 0)
+		}
+		if ebiten.IsKeyPressed(ebiten.KeyUp) || ebiten.IsKeyPressed(ebiten.KeyW) {
+			e.cam.Translate(0, speed)
+		} else if ebiten.IsKeyPressed(ebiten.KeyDown) || ebiten.IsKeyPressed(ebiten.KeyS) {
+			e.cam.Translate(0, -speed)
+		}
 	}
-	if ebiten.IsKeyPressed(ebiten.KeyUp) || ebiten.IsKeyPressed(ebiten.KeyW) {
-		e.cam.Translate(0, speed)
-	} else if ebiten.IsKeyPressed(ebiten.KeyDown) || ebiten.IsKeyPressed(ebiten.KeyS) {
-		e.cam.Translate(0, -speed)
-	}
-	if !imgui.IsWindowHoveredV(imgui.HoveredFlagsAnyWindow) {
+	if !io.WantCaptureMouse() {
+		// if !imgui.IsWindowHoveredV(imgui.HoveredFlagsAnyWindow) {
 		_, yoff := ebiten.Wheel()
 		e.zoom *= math.Pow(zoomSpeed, yoff)
 		e.zoom = clamp(e.zoom, zoomMin, zoomMax)
@@ -407,9 +412,12 @@ func (e *Editor) drawUI() {
 }
 
 const (
-	PopupSave         = "PopupSave"
-	PopupSaveProgress = "PopupSaveProgress"
-	PopupSaveResponse = "PopupSaveResponse"
+	PopupSave                 = "PopupSave"
+	PopupSaveProgress         = "PopupSaveProgress"
+	PopupSaveResponse         = "PopupSaveResponse"
+	PopupSaveOverrideExisting = "PopupSaveOverrideExisting"
+	PopupSaveOverrideBanned   = "PopupSaveOverrideBanned"
+	PopupSaveBanned           = "PopupSaveBanned"
 )
 
 func (e *Editor) savePopup() {
@@ -444,21 +452,63 @@ func (e *Editor) savePopup() {
 			} else {
 				log.Println(e.saveresp)
 			}
+
+			switch status := e.saveresp.Get("status"); status {
+			case "exists":
+				defer imgui.OpenPopup(PopupSaveOverrideExisting)
+			case "banned":
+				defer imgui.OpenPopup(PopupSaveOverrideBanned)
+			default:
+				defer imgui.OpenPopup(PopupSaveResponse)
+			}
 			imgui.CloseCurrentPopup()
-			defer imgui.OpenPopup(PopupSaveResponse)
 		}
 
 		imgui.Text(fmt.Sprintf("Saving the level... %c", spinner()))
 		imgui.EndPopup()
 	}
+	// PopupOverrideExisting
+	const existingMessage = "You have another level with this title. Is it okay to overwrite the existing level with this save?"
+	if open, yes := yesnoPopup(PopupSaveOverrideExisting, existingMessage); open {
+		if yes {
+
+		}
+	}
+	// if imgui.BeginPopupModalV(PopupSaveOverrideExisting, nil, imgui.WindowFlagsAlwaysAutoResize) {
+	// 	if imgui.Button("Yes") {
+
+	// 	}
+	// 	imgui.SameLine()
+	// 	if imgui.Button("No") {
+
+	// 	}
+	// 	imgui.EndPopup()
+	// }
 	// PopupSaveResponse
 	if imgui.BeginPopupModalV(PopupSaveResponse, nil, imgui.WindowFlagsAlwaysAutoResize) {
-		imgui.Text(e.saveresp)
+		// imgui.Text(e.saveresp)
 		if imgui.Button("OK") {
 			imgui.CloseCurrentPopup()
 		}
 		imgui.EndPopup()
 	}
+}
+
+func yesnoPopup(name string, message string) (open bool, result bool) {
+	if open = imgui.BeginPopupModalV(name, nil, imgui.WindowFlagsAlwaysAutoResize); open {
+		imgui.Text(message)
+		if imgui.Button("Yes") {
+			result = true
+			imgui.CloseCurrentPopup()
+		}
+		imgui.SameLine()
+		if imgui.Button("No") {
+			result = false
+			imgui.CloseCurrentPopup()
+		}
+		imgui.EndPopup()
+	}
+	return
 }
 
 const (
