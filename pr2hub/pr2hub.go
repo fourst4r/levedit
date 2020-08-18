@@ -455,7 +455,6 @@ func (r *Req) Done(v interface{}) bool {
 			if reflect.ValueOf(resp).Kind() == reflect.String {
 				rv.Elem().SetString(resp.(string))
 			} else {
-				fmt.Printf("%T", resp)
 				rv.Elem().Set(reflect.ValueOf(resp).Elem())
 			}
 			return true

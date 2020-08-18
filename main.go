@@ -390,34 +390,40 @@ func (e *Editor) drawUI() {
 
 		imgui.SameLine()
 
-		preview := "guest"
-		if e.config.SelectedAcc < len(e.config.Accs) {
-			preview = e.config.Accs[e.config.SelectedAcc].User
+		preview := "not logged in"
+		if sel := e.config.selectedAcc(); sel != -1 {
+			preview = e.config.Accs[sel].User
 		}
-		if imgui.BeginCombo("Account", preview) {
+		if imgui.BeginCombo("", preview) {
 			for i, acc := range e.config.Accs {
 				if imgui.Selectable(acc.User) {
-					e.config.SelectedAcc = i
-					e.setAcc(e.config.Accs[i])
-					if err := e.config.Save(); err != nil {
-						log.Println(err)
-					}
+					e.updateSelectedAcc(i)
 				}
 			}
 			imgui.EndCombo()
 		}
+		imgui.SameLine()
+		if imgui.Button("X") {
+			if sel := e.config.selectedAcc(); sel != -1 {
+				e.config.Accs = append(e.config.Accs[:sel], e.config.Accs[sel+1:]...)
+				new := int(math.Max(0, float64(len(e.config.Accs)-1)))
+				e.updateSelectedAcc(new)
+			}
+		}
+		imgui.SameLine()
+		imgui.Text("Account")
 	}
 
 	imgui.End()
 }
 
 const (
-	PopupSave                 = "PopupSave"
-	PopupSaveProgress         = "PopupSaveProgress"
-	PopupSaveResponse         = "PopupSaveResponse"
-	PopupSaveOverrideExisting = "PopupSaveOverrideExisting"
-	PopupSaveOverrideBanned   = "PopupSaveOverrideBanned"
-	PopupSaveBanned           = "PopupSaveBanned"
+	PopupSave                  = "PopupSave"
+	PopupSaveProgress          = "PopupSaveProgress"
+	PopupSaveResponse          = "PopupSaveResponse"
+	PopupSaveOverwriteExisting = "PopupSaveOverwriteExisting"
+	PopupSaveOverrideBanned    = "PopupSaveOverrideBanned"
+	PopupSaveBanned            = "PopupSaveBanned"
 )
 
 func (e *Editor) savePopup() {
@@ -428,15 +434,21 @@ func (e *Editor) savePopup() {
 		imgui.InputTextMultiline("Note", &e.Course.Note)
 		imgui.Checkbox("Publish", &e.Course.Live)
 		if imgui.Button("Save") {
-			acc := e.config.Accs[e.config.SelectedAcc]
-			// log.Println("save", acc.User, acc.Token)
-			var err error
-			e.req, err = pr2hub.UploadLevel(e.Course.String(acc.User, acc.Token))
-			if err != nil {
-				log.Println(err)
+			if sel := e.config.selectedAcc(); sel != -1 {
+				acc := e.config.Accs[sel]
+				// log.Println("save", acc.User, acc.Token)
+				val := e.Course.Values(acc.User)
+				val.Set("token", acc.Token)
+				val.Set("override_existing", "0")
+				val.Set("override_banned", "0")
+				var err error
+				e.req, err = pr2hub.UploadLevel(val.Encode())
+				if err != nil {
+					log.Println(err)
+				}
+				imgui.CloseCurrentPopup()
+				defer imgui.OpenPopup(PopupSaveProgress)
 			}
-			imgui.CloseCurrentPopup()
-			defer imgui.OpenPopup(PopupSaveProgress)
 		}
 		imgui.SameLine()
 		if imgui.Button("Cancel") {
@@ -455,7 +467,7 @@ func (e *Editor) savePopup() {
 
 			switch status := e.saveresp.Get("status"); status {
 			case "exists":
-				defer imgui.OpenPopup(PopupSaveOverrideExisting)
+				defer imgui.OpenPopup(PopupSaveOverwriteExisting)
 			case "banned":
 				defer imgui.OpenPopup(PopupSaveOverrideBanned)
 			default:
@@ -467,26 +479,41 @@ func (e *Editor) savePopup() {
 		imgui.Text(fmt.Sprintf("Saving the level... %c", spinner()))
 		imgui.EndPopup()
 	}
-	// PopupOverrideExisting
+	// PopupSaveOverwriteExisting
 	const existingMessage = "You have another level with this title. Is it okay to overwrite the existing level with this save?"
-	if open, yes := yesnoPopup(PopupSaveOverrideExisting, existingMessage); open {
+	if open, yes := yesnoPopup(PopupSaveOverwriteExisting, existingMessage); open {
 		if yes {
-
+			acc := e.config.Accs[e.config.selectedAcc()]
+			val := e.Course.Values(acc.User)
+			val.Set("token", acc.Token)
+			val.Set("overwrite_existing", "1")
+			var err error
+			e.req, err = pr2hub.UploadLevel(val.Encode())
+			if err != nil {
+				log.Println(err)
+			}
+			defer imgui.OpenPopup(PopupSaveProgress)
 		}
 	}
-	// if imgui.BeginPopupModalV(PopupSaveOverrideExisting, nil, imgui.WindowFlagsAlwaysAutoResize) {
-	// 	if imgui.Button("Yes") {
-
+	// PopupSaveOverrideBanned
+	// const bannedMessage = "You are socially banned, so you can only save as unpublished. Do you want to?"
+	// if open, yes := yesnoPopup(PopupSaveOverwriteExisting, existingMessage); open {
+	// 	if yes {
+	// 		acc := e.config.Accs[e.config.SelectedAcc]
+	// 		val := e.Course.Values(acc.User)
+	// 		val.Set("token", acc.Token)
+	// 		val.Set("overwrite_existing", "1")
+	// 		var err error
+	// 		e.req, err = pr2hub.UploadLevel(val.Encode())
+	// 		if err != nil {
+	// 			log.Println(err)
+	// 		}
+	// 		defer imgui.OpenPopup(PopupSaveProgress)
 	// 	}
-	// 	imgui.SameLine()
-	// 	if imgui.Button("No") {
-
-	// 	}
-	// 	imgui.EndPopup()
 	// }
 	// PopupSaveResponse
 	if imgui.BeginPopupModalV(PopupSaveResponse, nil, imgui.WindowFlagsAlwaysAutoResize) {
-		// imgui.Text(e.saveresp)
+		imgui.Text(e.saveresp.Get("message"))
 		if imgui.Button("OK") {
 			imgui.CloseCurrentPopup()
 		}
@@ -496,7 +523,9 @@ func (e *Editor) savePopup() {
 
 func yesnoPopup(name string, message string) (open bool, result bool) {
 	if open = imgui.BeginPopupModalV(name, nil, imgui.WindowFlagsAlwaysAutoResize); open {
+		imgui.PushTextWrapPosV(300.0)
 		imgui.Text(message)
+		imgui.PopTextWrapPos()
 		if imgui.Button("Yes") {
 			result = true
 			imgui.CloseCurrentPopup()
@@ -567,7 +596,7 @@ func (e *Editor) loadPopup() {
 
 		if imgui.Button("Delete") && int(e.levelsselected) < len(e.levelsgetresp.Levels) {
 			level := e.levelsgetresp.Levels[e.levelsselected]
-			token := e.config.Accs[e.config.SelectedAcc].Token
+			token := e.config.Accs[e.config.selectedAcc()].Token
 			var err error
 			e.req, err = pr2hub.DeleteLevel(level.LevelID, token)
 			if err != nil {
@@ -730,15 +759,8 @@ func (e *Editor) loginPopup() {
 				if resp.Success {
 					e.loginstatus = fmt.Sprint("Login successful ")
 					acc := Acc{e.loginuser, resp.Token}
-					e.setAcc(acc)
 					e.config.Accs = append(e.config.Accs, acc)
-					e.config.SelectedAcc = len(e.config.Accs) - 1
-					err = e.config.Save()
-					if err != nil {
-						log.Println(err)
-					}
-
-					// imgui.CloseCurrentPopup()
+					e.updateSelectedAcc(len(e.config.Accs) - 1)
 				} else {
 					e.loginstatus = resp.Error
 					defer imgui.OpenPopup(PopupLoginFailure)
@@ -766,18 +788,31 @@ func (e *Editor) loginPopup() {
 	}
 }
 
-func (e *Editor) setAcc(acc Acc) {
-	u, err := url.Parse("https://pr2hub.com")
-	if err != nil {
-		log.Fatalln(err)
+func (e *Editor) updateSelectedAcc(selected int) {
+	e.config.SelectedAcc = selected
+	if err := e.config.Save(); err != nil {
+		log.Println(err)
 	}
-	cookie := &http.Cookie{Name: "token", Value: acc.Token}
-	http.DefaultClient.Jar, err = cookiejar.New(nil)
-	if err != nil {
-		log.Fatalln(err)
+	e.loadSelectedAcc()
+}
+
+func (e *Editor) loadSelectedAcc() {
+	if sel := e.config.selectedAcc(); sel != -1 {
+		acc := e.config.Accs[sel]
+		u, err := url.Parse("https://pr2hub.com")
+		if err != nil {
+			log.Fatalln(err)
+		}
+		cookie := &http.Cookie{Name: "token", Value: acc.Token}
+		http.DefaultClient.Jar, err = cookiejar.New(nil)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		http.DefaultClient.Jar.SetCookies(u, []*http.Cookie{cookie})
+		log.Printf("Logged in as %s:%s\n", acc.User, acc.Token)
+	} else {
+		http.DefaultClient.Jar = nil
 	}
-	http.DefaultClient.Jar.SetCookies(u, []*http.Cookie{cookie})
-	log.Printf("Logged in as %s:%s\n", acc.User, acc.Token)
 }
 
 func main() {
@@ -795,13 +830,7 @@ func main() {
 		zoom:   1,
 		config: cfg,
 	}
-	if len(cfg.Accs) > 0 {
-		if cfg.SelectedAcc > len(cfg.Accs) {
-			e.setAcc(cfg.Accs[0])
-		} else {
-			e.setAcc(cfg.Accs[cfg.SelectedAcc])
-		}
-	}
+	e.loadSelectedAcc()
 
 	// resp, err := pr2hub.CheckLogin()
 	// if err == nil {

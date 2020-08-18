@@ -45,6 +45,13 @@ type Config struct {
 	SelectedAcc int
 }
 
+func (c *Config) selectedAcc() int {
+	if c.SelectedAcc < 0 || c.SelectedAcc >= len(c.Accs) {
+		return -1
+	}
+	return c.SelectedAcc
+}
+
 func (c *Config) Save() error {
 	f, err := os.OpenFile(configPath, os.O_CREATE|os.O_WRONLY, 0700)
 	if err != nil {
